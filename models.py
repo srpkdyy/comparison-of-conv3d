@@ -59,7 +59,7 @@ class PseudoBlcok(nn.Module):
         return h + self.skip(x)
 
 
-class Classifier(nn.Module):
+class ActionClassifier(nn.Module):
     def __init__(self, block_type='res', ch=3, dims=(64, 128, 256, 512), classes=10):
         super().__init__()
         if block_type == 'res':
