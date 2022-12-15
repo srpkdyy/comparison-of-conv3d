@@ -9,6 +9,27 @@ def activation():
     return nn.SiLU()
 
 
+class LegacyResBlock(nn.Module):
+    def __init__(self, dim, out_dim=None, k=3, s=1, p=1, padmode='replicate'):
+        super().__init__()
+        out_dim = out_dim or dim
+        self.block1 = nn.Sequential(
+            nn.Conv3d(dim, out_dim, k, s, p, padding_mode=padmode),
+            normalize(out_dim),
+            activation(),
+        )
+        self.block2 = nn.Sequential(
+            nn.Conv3d(out_dim, out_dim, k, s, p, padding_mode=padmode)
+            normalize(out_dim),
+            activation(),
+        )
+        self.skip = nn.Identity() if dim == out_dim else nn.Conv3d(dim, out_dim, 1)
+
+    def forward(self, x):
+        h = self.block1(x)
+        h = self.block2(h)
+        return h + self.skip(x)
+
 class ResBlock(nn.Module):
     def __init__(self, dim, out_dim=None, k=3, s=1, p=1, padmode='replicate'):
         super().__init__()
@@ -57,6 +78,48 @@ class PseudoBlcok(nn.Module):
         h = self.block1(x)
         h = self.block2(h)
         return h + self.skip(x)
+
+
+class ConvBlock(nn.Module):
+    def __init__(self, dim, out_dim=None, k=3, s=1, padmode='replicate'):
+        super().__init__()
+        out_dim = out_dim or dim
+        self.norm = normalize(dim)
+        self.silu = activation()
+        self.conv = nn.Conv3d(dim, out_dim, k, s, k//2, padding_mode=padmode)
+
+    def forward(self, x):
+        return self.conv(self.silu(self.norm(x)))
+
+
+class STDCBlock(nn.Module):
+    def __init__(self, dim, out_dim, n_blocks=4, s=1):
+        self.stride = s
+        blocks = []
+        for i in range(n_blocks):
+            if i == 0:
+                blocks.append(ConvBlock(dim, out_dim//2, 1))
+            elif i == 1 and n_blocks == 2:
+                blocks.append(ConvBlock(out_dim//2, out_dim//2, stride=s))
+            elif i == 1 and n_blocks > 2:
+                blocks.append(ConvBlock(out_dim//2, out_dim//4, stride=s))
+            elif i < n_blocks - 1:
+                blocks.append(ConvBlock(out_dim//(2**i), out_dim//(2**(i+1))))
+            else:
+                blocks.append(ConvBlock(out_dim//(2**i), out_dim//(2**i)))
+
+        self.blocks = nn.ModuleList(*blocks)
+
+        if s == 2:
+            self.
+
+    def forward(self, x):
+        outs = []
+        for i, block in enumerate(self.blocks):
+            x = block(x)
+            outs.append(x)
+
+        return torch.cat(outs, dim=1)
 
 
 class ActionClassifier(nn.Module):
