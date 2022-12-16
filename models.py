@@ -2,33 +2,12 @@ import torch
 import torch.nn as nn
 
 
-def normalize(dim):
-    return nn.GroupNorm(32, dim, eps=1e-6)
+def normalize(dim, groups=32):
+    return nn.GroupNorm(groups, dim, eps=1e-6)
 
 def activation():
     return nn.SiLU()
 
-
-class LegacyResBlock(nn.Module):
-    def __init__(self, dim, out_dim=None, k=3, s=1, p=1, padmode='replicate'):
-        super().__init__()
-        out_dim = out_dim or dim
-        self.block1 = nn.Sequential(
-            nn.Conv3d(dim, out_dim, k, s, p, padding_mode=padmode),
-            normalize(out_dim),
-            activation(),
-        )
-        self.block2 = nn.Sequential(
-            nn.Conv3d(out_dim, out_dim, k, s, p, padding_mode=padmode)
-            normalize(out_dim),
-            activation(),
-        )
-        self.skip = nn.Identity() if dim == out_dim else nn.Conv3d(dim, out_dim, 1)
-
-    def forward(self, x):
-        h = self.block1(x)
-        h = self.block2(h)
-        return h + self.skip(x)
 
 class ResBlock(nn.Module):
     def __init__(self, dim, out_dim=None, k=3, s=1, p=1, padmode='replicate'):
@@ -52,6 +31,28 @@ class ResBlock(nn.Module):
         return h + self.skip(x)
 
 
+class LegacyResBlock(nn.Module):
+    def __init__(self, dim, out_dim=None, k=3, s=1, p=1, padmode='replicate'):
+        super().__init__()
+        out_dim = out_dim or dim
+        self.block1 = nn.Sequential(
+            nn.Conv3d(dim, out_dim, k, s, p, padding_mode=padmode),
+            normalize(out_dim),
+            activation(),
+        )
+        self.block2 = nn.Sequential(
+            nn.Conv3d(out_dim, out_dim, k, s, p, padding_mode=padmode),
+            normalize(out_dim),
+            activation(),
+        )
+        self.skip = nn.Identity() if dim == out_dim else nn.Conv3d(dim, out_dim, 1)
+
+    def forward(self, x):
+        h = self.block1(x)
+        h = self.block2(h)
+        return h + self.skip(x)
+    
+
 class PseudoBlcok(nn.Module):
     def __init__(self, dim, out_dim=None, k=3, s=1, p=1, padmode='replicate'):
         super().__init__()
@@ -60,15 +61,15 @@ class PseudoBlcok(nn.Module):
             normalize(dim),
             activation(),
             nn.Conv3d(dim, out_dim, (1, k, k), s, (0, p, p), padding_mode=padmode),
-            normalize(dim),
+            normalize(out_dim),
             activation(),
             nn.Conv3d(out_dim, out_dim, (k, 1, 1), s, (p, 0, 0), padding_mode=padmode),
         )
         self.block2 = nn.Sequential(
-            normalize(dim),
+            normalize(out_dim),
             activation(),
             nn.Conv3d(out_dim, out_dim, (1, k, k), s, (0, p, p), padding_mode=padmode),
-            normalize(dim),
+            normalize(out_dim),
             activation(),
             nn.Conv3d(out_dim, out_dim, (k, 1, 1), s, (p, 0, 0), padding_mode=padmode),
         )
@@ -84,7 +85,7 @@ class ConvBlock(nn.Module):
     def __init__(self, dim, out_dim=None, k=3, s=1, padmode='replicate'):
         super().__init__()
         out_dim = out_dim or dim
-        self.norm = normalize(dim)
+        self.norm = normalize(dim, min(32, dim))
         self.silu = activation()
         self.conv = nn.Conv3d(dim, out_dim, k, s, k//2, padding_mode=padmode)
 
@@ -94,24 +95,22 @@ class ConvBlock(nn.Module):
 
 class STDCBlock(nn.Module):
     def __init__(self, dim, out_dim, n_blocks=4, s=1):
+        super().__init__()
         self.stride = s
         blocks = []
         for i in range(n_blocks):
             if i == 0:
                 blocks.append(ConvBlock(dim, out_dim//2, 1))
             elif i == 1 and n_blocks == 2:
-                blocks.append(ConvBlock(out_dim//2, out_dim//2, stride=s))
+                blocks.append(ConvBlock(out_dim//2, out_dim//2, s=s))
             elif i == 1 and n_blocks > 2:
-                blocks.append(ConvBlock(out_dim//2, out_dim//4, stride=s))
+                blocks.append(ConvBlock(out_dim//2, out_dim//4, s=s))
             elif i < n_blocks - 1:
                 blocks.append(ConvBlock(out_dim//(2**i), out_dim//(2**(i+1))))
             else:
                 blocks.append(ConvBlock(out_dim//(2**i), out_dim//(2**i)))
 
-        self.blocks = nn.ModuleList(*blocks)
-
-        if s == 2:
-            self.
+        self.blocks = nn.ModuleList(blocks)
 
     def forward(self, x):
         outs = []
@@ -127,11 +126,14 @@ class ActionClassifier(nn.Module):
         super().__init__()
         if block_type == 'res':
             block = ResBlock
+        elif block_type == 'legacy':
+            block = LegacyResBlock
         elif block_type == 'pseudo':
             block = PseudoBlcok
-
+        elif block_type == 'stdc':
+            block = STDCBlock
         
-        self.init_conv = nn.Conv3d(ch, dims[0], (1, 4, 4), (1, 2, 2), (0, 1, 1), padding_mode='replicate')
+        self.init_conv = nn.Conv3d(ch, dims[0], 3, 1, 1, padding_mode='replicate')
         in_dim = dims[0]
         layers = []
         for i, dim in enumerate(dims):
@@ -149,3 +151,18 @@ class ActionClassifier(nn.Module):
     def forward(self, x):
         x = self.init_conv(x)
         return self.layers(x)
+
+
+if __name__ == '__main__':
+    a = torch.rand(2, 3, 32, 64, 64)
+    models = {
+        'res': ActionClassifier('res'),
+        'legacy': ActionClassifier('legacy'),
+        'pseudo': ActionClassifier('pseudo'),
+        'stdc': ActionClassifier('stdc')
+    }
+    print(f'input shape, {a.shape}')
+    for t, m in models.items():
+        out = m(a)
+        print(f'block_type: {t}, Params: {sum(p.numel() for p in m.parameters() if p.requires_grad) // 1000000}M')
+
